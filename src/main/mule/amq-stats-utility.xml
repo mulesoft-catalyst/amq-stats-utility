@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:cloudhub="http://www.mulesoft.org/schema/mule/cloudhub" xmlns:email="http://www.mulesoft.org/schema/mule/email"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http" xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+http://www.mulesoft.org/schema/mule/cloudhub http://www.mulesoft.org/schema/mule/cloudhub/current/mule-cloudhub.xsd">
+
+	<cloudhub:config name="CloudHub_Config" doc:name="CloudHub Config" doc:id="7baa4643-f496-4f09-bb0d-1c5eb590abf4" >
+		<cloudhub:connection username="${anypoint.username}" password="${anypoint.password}" environment="${anypoint.env}" />
+	</cloudhub:config>
+	<http:request-config name="HTTP_Request_configuration1" doc:name="HTTP Request configuration" doc:id="6e3932eb-e4ee-48e4-94d9-6a59d5badea0" enableCookies="false">
+		<http:request-connection protocol="HTTPS" host="anypoint.mulesoft.com" />
+	</http:request-config>
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="838616b8-1fa9-42ba-895d-f4bce7dd48a1" >
+		<http:listener-connection host="0.0.0.0" port="8081" />
+	</http:listener-config>
+	<flow name="amq-stats-utilityFlow" doc:id="c8d72445-f045-4ecc-a17e-470c2bc3c864" >
+		<scheduler doc:name="DLQ Scheduler" doc:id="8637f0dc-45d0-497e-a8a3-bb02d6ed8356" >
+			<scheduling-strategy >
+				<fixed-frequency frequency="${frequency}" timeUnit="SECONDS"/>
+			</scheduling-strategy>
+		</scheduler>
+		<set-variable value="#[${frequency} default 900]" doc:name="Set frrequency" doc:id="c1915850-00f9-4e78-b433-6f8b758f031d" variableName="frequency"/>
+		<set-variable value="#[${queueNames} default []]" doc:name="setQueueNames" doc:id="9b30acee-3b04-4481-80c5-ad0f9fc1c4e5" variableName="queueNames"/>
+		<ee:transform doc:name="Transform Message" doc:id="5e5b99dc-186a-446c-970c-7a71479ebe0f" >
+			
+			<ee:variables >
+				<ee:set-variable variableName="startTime" ><![CDATA[%dw 2.0
+output application/java
+
+
+var previousTime = (now() - "PT$(vars.frequency)S") >> "GMT"
+
+
+---
+
+previousTime as String {format: "E, dd MMM YYYY HH:mm:ss ZZZZ"}
+
+]]></ee:set-variable>
+				<ee:set-variable variableName="endTime" ><![CDATA[%dw 2.0
+output application/java
+
+
+
+var nowTime = now() >> "GMT"
+
+---
+
+nowTime as String {format: "E, dd MMM YYYY HH:mm:ss ZZZZ"}
+
+]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<flow-ref doc:name="Flow Reference" doc:id="9ff8ed61-4ce0-4e92-8dbc-4d7973c44bae" name="get-acces-token"/>
+		<parallel-foreach doc:name="Parallel For Each" doc:id="515a1f57-87ad-46d0-b243-e4f326e0fb7a" collection="vars.queueNames">
+			<http:request method="GET" doc:name="Request" doc:id="7b330c8e-e646-432e-9d9c-e6a0d6d3d0a8" config-ref="HTTP_Request_configuration" path='#["/mq/stats/api/v1/organizations/${anypoint.orgId}/environments/${anypoint.env}/regions/${anypoint.region}/queues/" ++ payload]'>
+				<http:headers ><![CDATA[#[output application/java
+---
+{
+	"Authorization" : "Bearer " ++ vars.bearerToken
+}]]]></http:headers>
+				<http:query-params ><![CDATA[#[output application/java
+---
+{
+	period : vars.frequency,
+	endDate : vars.endTime,
+	startDate : vars.startTime
+}]]]></http:query-params>
+			</http:request>
+			<set-variable value="#[(payload.messagesSent.value reduce $$ + $) default 0]" doc:name="Set Variable" doc:id="f88e3963-bec8-4e9a-96c4-d09b5f9e4842" variableName="messageCount"/>
+			<choice doc:name="Choice" doc:id="684e70dc-2eee-47a2-b095-7e29dbd0fca6" >
+				<when expression="#[vars.messageCount &gt; 0]">
+					<logger level="INFO" doc:name="Logger" doc:id="a639c3b1-bd1f-4d7c-ae82-ea8a2fff27f9" message="Found message count for queue: #[payload.destination] increased by #[vars.messageCount] since last run. Raising CH Notification..."/>
+					<cloudhub:create-notification doc:name="Create Notification" doc:id="726271f1-ea75-418c-82f2-414ff4446f67" config-ref="CloudHub_Config" domain="${anypoint.domain}" priority="INFO">
+						<cloudhub:message ><![CDATA[#["message count for queue: " ++ payload.destination ++ " increased by: " ++  vars.messageCount]]]></cloudhub:message>
+					</cloudhub:create-notification>
+				</when>
+				<otherwise >
+					<logger level="INFO" doc:name="Logger" doc:id="838850e2-df00-453d-9613-c13f1b71c198" message="no message found at run #[vars.endTime] for queue: #[payload.destination] since last run!!"/>
+				</otherwise>
+			</choice>
+		</parallel-foreach>
+	</flow>
+	<flow name="get-acces-token" doc:id="b81daa1c-8f66-4a62-b708-98827b1417a2" >
+		<http:request method="POST" doc:name="Request" doc:id="ab2071b7-c9c2-4ee3-ba91-0b1dd38ad5a3" config-ref="HTTP_Request_configuration1" path="/accounts/login">
+			<http:body ><![CDATA[#[output application/json 
+--- 
+{
+	"username": p('anypoint.username'),
+	"password": p('anypoint.password')
+}]]]></http:body>
+			<http:headers ><![CDATA[#[output application/java
+---
+{
+	"Content-Type" : "application/json"
+}]]]></http:headers>
+		</http:request>
+		<set-variable value="#[payload.access_token]" doc:name="Set Variable" doc:id="98231909-bf5e-4edb-9847-8ebdaa8485ec" variableName="bearerToken"/>
+	</flow>
+</mule>
